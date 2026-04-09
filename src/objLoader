@@ -1,0 +1,186 @@
+import type { MeshData, Bounds, Vec3, Vec2 } from "./mesh";
+
+type OBJVertexRef = {
+  v: number;
+  vt: number | null;
+  vn: number | null;
+};
+
+function parseOBJIndex(value: string, arrayLength: number): number {
+  const idx = parseInt(value, 10);
+  if (Number.isNaN(idx)) {
+    throw new Error(`Invalid OBJ index: ${value}`);
+  }
+
+  // OBJ indices start at 1. Negative indices are relative to the end.
+  if (idx > 0) return idx - 1;
+  return arrayLength + idx;
+}
+
+function computeBounds(positions: Float32Array): Bounds {
+  if (positions.length < 3) {
+    return {
+      min: [0, 0, 0],
+      max: [0, 0, 0],
+      center: [0, 0, 0],
+      radius: 0,
+    };
+  }
+
+  let minX = positions[0];
+  let minY = positions[1];
+  let minZ = positions[2];
+  let maxX = positions[0];
+  let maxY = positions[1];
+  let maxZ = positions[2];
+
+  for (let i = 3; i < positions.length; i += 3) {
+    const x = positions[i + 0];
+    const y = positions[i + 1];
+    const z = positions[i + 2];
+
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+
+  const center: Vec3 = [
+    (minX + maxX) * 0.5,
+    (minY + maxY) * 0.5,
+    (minZ + maxZ) * 0.5,
+  ];
+
+  let radius = 0;
+  for (let i = 0; i < positions.length; i += 3) {
+    const dx = positions[i + 0] - center[0];
+    const dy = positions[i + 1] - center[1];
+    const dz = positions[i + 2] - center[2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist > radius) radius = dist;
+  }
+
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    center,
+    radius,
+  };
+}
+
+export function loadOBJFromText(objText: string): MeshData {
+  const tempPositions: Vec3[] = [];
+  const tempUVs: Vec2[] = [];
+  const tempNormals: Vec3[] = [];
+
+  const finalPositions: number[] = [];
+  const finalUVs: number[] = [];
+  const finalNormals: number[] = [];
+  const finalIndices: number[] = [];
+
+  const vertexMap = new Map<string, number>();
+
+  const lines = objText.split(/\r?\n/);
+
+  function getOrCreateVertex(ref: OBJVertexRef): number {
+    const key = `${ref.v}/${ref.vt ?? ""}/${ref.vn ?? ""}`;
+
+    const existing = vertexMap.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const pos = tempPositions[ref.v];
+    if (!pos) {
+      throw new Error(`Position index out of range: ${ref.v}`);
+    }
+
+    finalPositions.push(pos[0], pos[1], pos[2]);
+
+    if (ref.vt !== null && tempUVs[ref.vt]) {
+      const uv = tempUVs[ref.vt];
+      finalUVs.push(uv[0], uv[1]);
+    } else {
+      finalUVs.push(0, 0);
+    }
+
+    if (ref.vn !== null && tempNormals[ref.vn]) {
+      const n = tempNormals[ref.vn];
+      finalNormals.push(n[0], n[1], n[2]);
+    } else {
+      finalNormals.push(0, 0, 0);
+    }
+
+    const newIndex = finalPositions.length / 3 - 1;
+    vertexMap.set(key, newIndex);
+    return newIndex;
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith("#")) continue;
+
+    const parts = line.split(/\s+/);
+    const cmd = parts[0];
+
+    if (cmd === "v") {
+      if (parts.length < 4) continue;
+      tempPositions.push([
+        parseFloat(parts[1]),
+        parseFloat(parts[2]),
+        parseFloat(parts[3]),
+      ]);
+    } else if (cmd === "vt") {
+      if (parts.length < 3) continue;
+      tempUVs.push([
+        parseFloat(parts[1]),
+        parseFloat(parts[2]),
+      ]);
+    } else if (cmd === "vn") {
+      if (parts.length < 4) continue;
+      tempNormals.push([
+        parseFloat(parts[1]),
+        parseFloat(parts[2]),
+        parseFloat(parts[3]),
+      ]);
+    } else if (cmd === "f") {
+      if (parts.length < 4) continue;
+
+      const refs: OBJVertexRef[] = parts.slice(1).map((token) => {
+        const [vStr, vtStr, vnStr] = token.split("/");
+
+        return {
+          v: parseOBJIndex(vStr, tempPositions.length),
+          vt: vtStr ? parseOBJIndex(vtStr, tempUVs.length) : null,
+          vn: vnStr ? parseOBJIndex(vnStr, tempNormals.length) : null,
+        };
+      });
+
+      // triangulate polygon fan-style
+      for (let i = 1; i < refs.length - 1; i++) {
+        const tri = [refs[0], refs[i], refs[i + 1]];
+        for (const ref of tri) {
+          finalIndices.push(getOrCreateVertex(ref));
+        }
+      }
+    }
+  }
+
+  const positions = new Float32Array(finalPositions);
+  const uvs = new Float32Array(finalUVs);
+  const normals = new Float32Array(finalNormals);
+  const indices = new Uint32Array(finalIndices);
+  const bounds = computeBounds(positions);
+
+  return {
+    positions,
+    normals,
+    uvs,
+    indices,
+    bounds,
+  };
+}
